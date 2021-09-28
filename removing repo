@@ -1,0 +1,106 @@
+
+Cleaning up artifactory with a groovy script
+
+On my employers blog I wrote an article about cleaning up your local maven repository. It gets polluted with old snapshot artifacts easily. It also leaves a lot of build around if you release regularly. After cleaning up your local copy you start thinking about the repository on the server. Would that also become as big as your local one? Of course. Therefore we need to clean that one up as well.
+
+In most of our projects we use Artifactory. It is nice that artifactory comes with a REST based api. The url’s can be a bit better and the content type of the response is not what I would expect. Still the documentation is good and lost of actions are possible. In this blog post I show you the basics of interacting with the REST api using groovy. Now let us shrink the repo.
+
+Introducing the artifactory api
+
+The frog wiki has a wiki page dedicated to the api. This page shows the GET/DELETE/PUT requests that you can execute. It shows the url, the response and the content type. If you click the following link you jump to the definition of Folder Info. After the link an image with the same data at the time of writing.
+
+http://wiki.jfrog.org/confluence/display/RTF/Artifactory%27s+REST+API#Artifactory%27sRESTAPI-FolderInfo
+Screen Shot 2011 09 26 at 16 08 39
+
+In the image you can also see the JSON response for the specific request. Have a look at the structure of the response. Look at the children. We will use it later on.
+Obtaining folder info
+
+Time to show some code. We will first have a look at a function to obtain information about the folder as provided by the caller. Since we group the functions in a class we have to look at configuration of this class as well. The constructor accepts a map that we call config. That way you can provided configuration for the server, the repository and the versions to remove. An example of the config map is.
+	
+def config = [
+    server: 'http://localhost:8080',
+    repository: 'libs-release-local',
+    versionsToRemove: ['/3.2.0-build-'],
+    dryRun: false]
+
+Than we can ask for information about a folder. The following code block shows two functions, one to obtain information about a folder and the other to ask for a connection with the server.
+def JSON folderInfo(path) {
+    def binding = [repository: config.repository, path: path]
+    def template = engine.createTemplate('''/artifactory/api/storage/$repository/$path''').make(binding)
+    def query = template.toString()
+ 
+    def server = obtainServerConnection()
+    def resp = server.get(path: query)
+    if (resp.status != 200) {
+        println "ERROR: problem obtaining folder info: " + resp.status
+        println query
+        System.exit(-1)
+    }
+    return resp.data
+}
+ 
+private RESTClient obtainServerConnection() {
+    def server = new RESTClient(config.server)
+    server.parser.'application/vnd.org.jfrog.artifactory.storage.FolderInfo+json' = server.parser.'application/json'
+    server.parser.'application/vnd.org.jfrog.artifactory.repositories.RepositoryDetailsList+json' = server.parser.'application/json'
+ 
+    return server
+}
+
+We make use of the groovy SimpleTemplateEngine. As you can see we build the query string with placeholders and attach a map with parameters to the template engine. Next step is to generate the query. After obtaining the connection to the server we execute the GET request and obtain the JSON data from the response. Notice the lines in the obtainServerConnection. The last two lines add mappings for the artifactory provided content types. We want them to be treated as normal json responses or else our mapping framework (Jackson) will not be able to process the result.
+Removing items
+
+The goal for this blog post is to present a script to clean your artifactory repository. Now that we know how to obtain information about a folder in artifactory, it is time to have a look at cleaning. The idea is to take the provided path as a starting point. Go through all the folders recursively and check if we are in an artifact folder. An artifact folder contains artifacts and should not have other folders. If a folder is not an artifact folder we are dealing with a grouped (maven terms). In our case we could determine an artifact folder by its name. All artifacts have -build- in their name. Hence the following function.
+	
+private def isArtifactFolder(child) {
+    child.uri.contains("-build-")
+}
+
+The next utility function is to actually delete a folder. The next function removes the provided path if we are not doing a dry run. If we did configure a dry run, we only print a message and do not actually do the delete. We again use the groovy template technology to create the query. Notice that the artifactory api uses the DELETE request.
+private def removeItem(path, child) {
+    println "folder: " + path + child.uri + " DELETE"
+    def binding = [repository: config.repository, path: path + child.uri]
+    def template = engine.createTemplate('''/artifactory/$repository/$path''').make(binding)
+    def query = template.toString()
+    if (!config.dryRun) {
+        def server = new RESTClient(config.server)
+        server.delete(path: query)
+    }
+}
+
+The last piece of the puzzle is the recursive function to check a folder for subfolders and give the command to remove a folder if it is in the list of folder to be removed. The next code block shows this function.
+	
+def cleanArtifactsRecursive(path) {
+    def deleteCounter = 0
+    JSON json = folderInfo(path)
+    json.children.each {child ->
+        if (child.folder) {
+            if (isArtifactFolder(child)) {
+                config.versionsToRemove.each {toRemove ->
+                    if (child.uri.startsWith(toRemove)) {
+                        removeItem(path, child)
+                        deleteCounter++
+                    }
+                }
+            } else {
+                if (!child.uri.contains("ro-scripts")) {
+                    deleteCounter += cleanArtifactsRecursive(path + child.uri)
+                }
+            }
+        }
+    }
+    return deleteCounter
+}
+
+The code is available online through github, check the references.
+References
+
+Cleaning up your maven repository
+    Other blogpost about groovy and cleaning your local maven repository automatically.
+Artifactory
+    Homepage of the creators of Artifactory, here you can also find commercial support
+Artifactory REST api
+
+    Documentation for the REST api that is provided by Artifactory
+The source code
+    Sourcecode of the script discussed in this article. 
